@@ -4,10 +4,10 @@
 package gocql
 
 import (
-	"database/sql/driver"
+	"github.com/titanous/go-backports/database/sql/driver"
 	"encoding/binary"
 	"fmt"
-	"github.com/tux21b/gocql/uuid"
+	"github.com/titanous/gocql/uuid"
 	"math"
 	"strconv"
 	"time"

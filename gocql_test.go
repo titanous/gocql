@@ -5,8 +5,8 @@ package gocql
 
 import (
 	"bytes"
-	"database/sql"
-	"github.com/tux21b/gocql/uuid"
+	"github.com/titanous/go-backports/database/sql"
+	"github.com/titanous/gocql/uuid"
 	"testing"
 	"time"
 )

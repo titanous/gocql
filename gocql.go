@@ -30,8 +30,8 @@ package gocql
 import (
 	"bytes"
 	"code.google.com/p/snappy-go/snappy"
-	"database/sql"
-	"database/sql/driver"
+	"github.com/titanous/go-backports/database/sql"
+	"github.com/titanous/go-backports/database/sql/driver"
 	"encoding/binary"
 	"fmt"
 	"io"
