@@ -31,10 +31,10 @@ package gocql
 import (
 	"bytes"
 	"code.google.com/p/snappy-go/snappy"
-	"github.com/titanous/go-backports/database/sql"
-	"github.com/titanous/go-backports/database/sql/driver"
 	"encoding/binary"
 	"fmt"
+	"github.com/titanous/go-backports/database/sql"
+	"github.com/titanous/go-backports/database/sql/driver"
 	"io"
 	"math/rand"
 	"net"

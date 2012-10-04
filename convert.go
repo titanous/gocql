@@ -5,9 +5,9 @@
 package gocql
 
 import (
-	"github.com/titanous/go-backports/database/sql/driver"
 	"encoding/binary"
 	"fmt"
+	"github.com/titanous/go-backports/database/sql/driver"
 	"github.com/titanous/gocql/uuid"
 	"math"
 	"strconv"
