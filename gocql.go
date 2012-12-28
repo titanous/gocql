@@ -195,6 +195,9 @@ func (cn *connection) recv() (byte, []byte, error) {
 	length := binary.BigEndian.Uint32(header[4:8])
 	var body []byte
 	if length > 0 {
+    if length > 100*1024*1024 { // > 100MB
+      return 0, nil, fmt.Errorf("frame too large (%dMB)", length/1024/1024)
+    }
 		body = make([]byte, length)
 		if _, err := cn.c.Read(body); err != nil {
 			return 0, nil, err
