@@ -56,7 +56,6 @@ const (
 	opResult       byte = 0x08
 	opPrepare      byte = 0x09
 	opExecute      byte = 0x0A
-       opLAST         byte = 0x0A // not a real opcode -- used to check for valid opcodes
 
 	flagCompressed byte = 0x01
 
@@ -79,7 +78,6 @@ type connection struct {
 	c           net.Conn
 	compression string
 	consistency byte
-       lock        chan int // unnecessary lock used for troubleshooting purposes
 }
 
 func Open(name string) (*connection, error) {
@@ -127,7 +125,7 @@ func Open(name string) (*connection, error) {
 		}
 	}
 
-       cn := &connection{c: c, compression: compression, consistency: consistency, lock: make(chan
+	cn := &connection{c: c, compression: compression, consistency: consistency}
 
 	b := &bytes.Buffer{}
 
@@ -149,14 +147,11 @@ func Open(name string) (*connection, error) {
 		b.WriteString(compression)
 	}
 
-       cn.lock <- 1 // acquire the channel lock
 	if err := cn.send(opStartup, b.Bytes()); err != nil {
-               <- cn.lock // release channel lock
 		return nil, err
 	}
 
 	opcode, _, err := cn.recv()
-       <- cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
@@ -196,30 +191,13 @@ func (cn *connection) recv() (byte, []byte, error) {
 	if _, err := cn.c.Read(header); err != nil {
 		return 0, nil, err
 	}
-       if header[0] != protoResponse {
-               // Seeing errors such as:
-               // Error reading prepare result for query <<select data from agg where
-               // slt = ?>> -- (unsupported frame version or not a response: 0xfe
-               // (header=[254 248 127 1 254 248 127 0]))
-               // Error reading prepare result for query <<select data from agg where
-               // slt = ?>> -- (unsupported frame version or not a response: 0x0
-               // (header=[0 0 0 0 0 0 0 0]))
-               return 0, nil, fmt.Errorf("unsupported frame version or not a response: 0x%x (header
-       }
-       if header[1] > 1 {
-               // this is overly conservative, but really helps catch correputed framing
-               return 0, nil, fmt.Errorf("unsupported frame flags: 0x%x (header=%v)", header[1], he
-       }
 	opcode := header[3]
-       if opcode > opLAST {
-               return 0, nil, fmt.Errorf("unknown opcode: 0x%x (header=%v)", opcode, header)
-       }
 	length := binary.BigEndian.Uint32(header[4:8])
 	var body []byte
 	if length > 0 {
-               if length > 256*1024*1024 { // spec says 256MB is max
-                       return 0, nil, fmt.Errorf("frame too large: %d (header=%v)", length, header)
-               }
+    if length > 100*1024*1024 { // > 100MB
+      return 0, nil, fmt.Errorf("frame too large (%dMB)", length/1024/1024)
+    }
 		body = make([]byte, length)
 		if _, err := cn.c.Read(body); err != nil {
 			return 0, nil, err
@@ -261,15 +239,11 @@ func (cn *connection) Prepare(query string) (driver.Stmt, error) {
 	body := make([]byte, len(query)+4)
 	binary.BigEndian.PutUint32(body[0:4], uint32(len(query)))
 	copy(body[4:], []byte(query))
-       cn.lock <- 1 // acquire the channel lock
 	if err := cn.send(opPrepare, body); err != nil {
-               <- cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := cn.recv()
-       <- cn.lock // release channel lock
 	if err != nil {
-                err = fmt.Errorf("Error reading prepare result for query <<%s>> -- (%s)", query, er
 		return nil, err
 	}
 	if opcode != opResult || binary.BigEndian.Uint32(body) != 4 {
@@ -356,13 +330,10 @@ func (st *statement) exec(v []driver.Value) error {
 }
 
 func (st *statement) Exec(v []driver.Value) (driver.Result, error) {
-       st.cn.lock <- 1 // acquire the channel lock
 	if err := st.exec(v); err != nil {
-               <- st.cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := st.cn.recv()
-       <- st.cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
@@ -371,13 +342,10 @@ func (st *statement) Exec(v []driver.Value) (driver.Result, error) {
 }
 
 func (st *statement) Query(v []driver.Value) (driver.Rows, error) {
-       st.cn.lock <- 1 // acquire the channel lock
 	if err := st.exec(v); err != nil {
-               <- st.cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := st.cn.recv()
-       <- st.cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
