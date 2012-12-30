@@ -79,7 +79,6 @@ type connection struct {
 	c           net.Conn
 	compression string
 	consistency byte
-       lock        chan int // unnecessary lock used for troubleshooting purposes
 }
 
 func Open(name string) (*connection, error) {
@@ -127,7 +126,7 @@ func Open(name string) (*connection, error) {
 		}
 	}
 
-       cn := &connection{c: c, compression: compression, consistency: consistency, lock: make(chan int, 1)}
+       cn := &connection{c: c, compression: compression, consistency: consistency}
 
 	b := &bytes.Buffer{}
 
@@ -149,14 +148,11 @@ func Open(name string) (*connection, error) {
 		b.WriteString(compression)
 	}
 
-       cn.lock <- 1 // acquire the channel lock
 	if err := cn.send(opStartup, b.Bytes()); err != nil {
-               <- cn.lock // release channel lock
 		return nil, err
 	}
 
 	opcode, _, err := cn.recv()
-       <- cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +174,9 @@ func Open(name string) (*connection, error) {
 }
 
 func (cn *connection) send(opcode byte, body []byte) error {
+       if cn.c == nil {
+               return driver.ErrBadConn
+       }
 	frame := make([]byte, len(body)+8)
 	frame[0] = protoRequest
 	frame[1] = 0
@@ -192,32 +191,43 @@ func (cn *connection) send(opcode byte, body []byte) error {
 }
 
 func (cn *connection) recv() (byte, []byte, error) {
+       if cn.c == nil {
+               return 0, nil, driver.ErrBadConn
+       }
 	header := make([]byte, 8)
 	if _, err := cn.c.Read(header); err != nil {
 		return 0, nil, err
 	}
        if header[0] != protoResponse {
-               // Seeing errors such as:
+               // Seeing errors using Ubuntu 10.04 such as:
                // Error reading prepare result for query <<select data from agg where
                // slt = ?>> -- (unsupported frame version or not a response: 0xfe
                // (header=[254 248 127 1 254 248 127 0]))
                // Error reading prepare result for query <<select data from agg where
                // slt = ?>> -- (unsupported frame version or not a response: 0x0
                // (header=[0 0 0 0 0 0 0 0]))
+               cn.c.Close()
+               cn.c = nil // ensure we generate ErrBadConn
                return 0, nil, fmt.Errorf("unsupported frame version or not a response: 0x%x (header=%v)", header[0], header)
        }
        if header[1] > 1 {
                // this is overly conservative, but really helps catch correputed framing
+               cn.c.Close()
+               cn.c = nil // ensure we generate ErrBadConn
                return 0, nil, fmt.Errorf("unsupported frame flags: 0x%x (header=%v)", header[1], header)
        }
 	opcode := header[3]
        if opcode > opLAST {
+               cn.c.Close()
+               cn.c = nil // ensure we generate ErrBadConn
                return 0, nil, fmt.Errorf("unknown opcode: 0x%x (header=%v)", opcode, header)
        }
 	length := binary.BigEndian.Uint32(header[4:8])
 	var body []byte
 	if length > 0 {
                if length > 256*1024*1024 { // spec says 256MB is max
+                       cn.c.Close()
+                       cn.c = nil // ensure we generate ErrBadConn
                        return 0, nil, fmt.Errorf("frame too large: %d (header=%v)", length, header)
                }
 		body = make([]byte, length)
@@ -242,18 +252,22 @@ func (cn *connection) recv() (byte, []byte, error) {
 }
 
 func (cn *connection) Begin() (driver.Tx, error) {
+       if cn.c == nil { return nil, driver.ErrBadConn }
 	return cn, nil
 }
 
 func (cn *connection) Commit() error {
+       if cn.c == nil { return driver.ErrBadConn }
 	return nil
 }
 
 func (cn *connection) Close() error {
+       if cn.c == nil { return driver.ErrBadConn }
 	return cn.c.Close()
 }
 
 func (cn *connection) Rollback() error {
+       if cn.c == nil { return driver.ErrBadConn }
 	return nil
 }
 
@@ -261,13 +275,10 @@ func (cn *connection) Prepare(query string) (driver.Stmt, error) {
 	body := make([]byte, len(query)+4)
 	binary.BigEndian.PutUint32(body[0:4], uint32(len(query)))
 	copy(body[4:], []byte(query))
-       cn.lock <- 1 // acquire the channel lock
 	if err := cn.send(opPrepare, body); err != nil {
-               <- cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := cn.recv()
-       <- cn.lock // release channel lock
 	if err != nil {
                 err = fmt.Errorf("Error reading prepare result for query <<%s>> -- (%s)", query, err.Error())
 		return nil, err
@@ -356,13 +367,10 @@ func (st *statement) exec(v []driver.Value) error {
 }
 
 func (st *statement) Exec(v []driver.Value) (driver.Result, error) {
-       st.cn.lock <- 1 // acquire the channel lock
 	if err := st.exec(v); err != nil {
-               <- st.cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := st.cn.recv()
-       <- st.cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
@@ -371,13 +379,10 @@ func (st *statement) Exec(v []driver.Value) (driver.Result, error) {
 }
 
 func (st *statement) Query(v []driver.Value) (driver.Rows, error) {
-       st.cn.lock <- 1 // acquire the channel lock
 	if err := st.exec(v); err != nil {
-               <- st.cn.lock // release channel lock
 		return nil, err
 	}
 	opcode, body, err := st.cn.recv()
-       <- st.cn.lock // release channel lock
 	if err != nil {
 		return nil, err
 	}
