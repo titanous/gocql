@@ -193,7 +193,7 @@ func (cn *connection) send(opcode byte, body []byte) error {
 
 func (cn *connection) recv() (byte, []byte, error) {
         defer func(){
-                if r := recover(); r != nil { logPanic(r) }
+                if r := recover(); r != nil { LogPanic(r) }
         }()
         if cn.c == nil {
                 return 0, nil, driver.ErrBadConn
@@ -486,7 +486,7 @@ func logBunny() {
         }
 }
 
-func logPanic(what interface{}) {
+func LogPanic(what interface{}) {
         for i:=len(logList)-1; i>=0; i-- {
                 fmt.Printf("LOG %v: %s\n", logList[i].c, logList[i].msg)
         }
