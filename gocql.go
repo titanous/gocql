@@ -56,7 +56,7 @@ const (
 	opResult       byte = 0x08
 	opPrepare      byte = 0x09
 	opExecute      byte = 0x0A
-       opLAST         byte = 0x0A // not a real opcode -- used to check for valid opcodes
+	opLAST         byte = 0x0A // not a real opcode -- used to check for valid opcodes
 
 	flagCompressed byte = 0x01
 
@@ -126,7 +126,7 @@ func Open(name string) (*connection, error) {
 		}
 	}
 
-       cn := &connection{c: c, compression: compression, consistency: consistency}
+	cn := &connection{c: c, compression: compression, consistency: consistency}
 
 	b := &bytes.Buffer{}
 
@@ -173,10 +173,19 @@ func Open(name string) (*connection, error) {
 	return cn, nil
 }
 
+// WriteFully writes a full byte array to a connection, issuing multiple net.conn.Write()
+// calls until all the bytes have gone out.
+func (cn *connection) writeFully(b []byte) (err error) {
+	for sent:=0; sent<int(len(b)); {
+		new, err := cn.c.Write(b[sent:])
+		if err != nil { return err }
+		sent += new
+	}
+	return nil
+}
+
 func (cn *connection) send(opcode byte, body []byte) error {
-        if cn.c == nil {
-                return driver.ErrBadConn
-        }
+	if cn.c == nil { return driver.ErrBadConn }
 	frame := make([]byte, len(body)+8)
 	frame[0] = protoRequest
 	frame[1] = 0
@@ -184,8 +193,7 @@ func (cn *connection) send(opcode byte, body []byte) error {
 	frame[3] = opcode
 	binary.BigEndian.PutUint32(frame[4:8], uint32(len(body)))
 	copy(frame[8:], body)
-        log(cn.c, fmt.Sprintf("write op=%x sz=%d", opcode, len(frame)))
-	if _, err := cn.c.Write(frame); err != nil {
+	if err := cn.writeFully(frame); err != nil {
 		return err
 	}
 	return nil
@@ -203,73 +211,49 @@ func (cn *connection) readFully(b []byte) (err error) {
 }
 
 func (cn *connection) recv() (byte, []byte, error) {
-        defer func(){
-                if r := recover(); r != nil { LogPanic(r) }
-        }()
-        if cn.c == nil {
-                return 0, nil, driver.ErrBadConn
-        }
+	if cn.c == nil {
+		return 0, nil, driver.ErrBadConn
+	}
 	header := make([]byte, 8)
-        log(cn.c, fmt.Sprintf("read_"))
 	if err := cn.readFully(header); err != nil {
-                log(cn.c, fmt.Sprintf("readH err=%s", err.Error()))
 		return 0, nil, err
 	}
-        log(cn.c, fmt.Sprintf("read 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
-                header[0], header[1], header[2], header[3], header[4],
-                header[5], header[6], header[7]))
-        if header[0] != protoResponse {
-                // Seeing errors using Ubuntu 10.04 such as:
-                // Error reading prepare result for query <<select data from agg where
-                // slt = ?>> -- (unsupported frame version or not a response: 0xfe
-                // (header=[254 248 127 1 254 248 127 0]))
-                // Error reading prepare result for query <<select data from agg where
-                // slt = ?>> -- (unsupported frame version or not a response: 0x0
-                // (header=[0 0 0 0 0 0 0 0]))
-                log(cn.c, fmt.Sprintf("close"))
-                cn.c.Close()
-                cn.c = nil // ensure we generate ErrBadConn
-                return 0, nil, fmt.Errorf("unsupported frame version or not a response: 0x%x (header=%v)", header[0], header)
-        }
-        if header[1] > 1 {
-               // this is overly conservative, but really helps catch correputed framing
-                log(cn.c, fmt.Sprintf("close"))
-                cn.c.Close()
-                cn.c = nil // ensure we generate ErrBadConn
-                return 0, nil, fmt.Errorf("unsupported frame flags: 0x%x (header=%v)", header[1], header)
-        }
+	if header[0] != protoResponse {
+		cn.c.Close()
+		cn.c = nil // ensure we generate ErrBadConn
+		return 0, nil, fmt.Errorf("unsupported frame version or not a response: 0x%x (header=%v)", header[0], header)
+	}
+	if header[1] > 1 {
+		// this may be overly conservative?
+		cn.c.Close()
+		cn.c = nil // ensure we generate ErrBadConn
+		return 0, nil, fmt.Errorf("unsupported frame flags: 0x%x (header=%v)", header[1], header)
+	}
 	opcode := header[3]
-        if opcode > opLAST {
-                log(cn.c, fmt.Sprintf("close"))
-                cn.c.Close()
-                cn.c = nil // ensure we generate ErrBadConn
-                return 0, nil, fmt.Errorf("unknown opcode: 0x%x (header=%v)", opcode, header)
-        }
+	if opcode > opLAST {
+		cn.c.Close()
+		cn.c = nil // ensure we generate ErrBadConn
+		return 0, nil, fmt.Errorf("unknown opcode: 0x%x (header=%v)", opcode, header)
+	}
 	length := binary.BigEndian.Uint32(header[4:8])
 	var body []byte
 	if length > 0 {
-                if length > 256*1024*1024 { // spec says 256MB is max
-                        cn.c.Close()
-                        cn.c = nil // ensure we generate ErrBadConn
-                        return 0, nil, fmt.Errorf("frame too large: %d (header=%v)", length, header)
-                }
+		if length > 256*1024*1024 { // spec says 256MB is max
+			cn.c.Close()
+			cn.c = nil // ensure we generate ErrBadConn
+			return 0, nil, fmt.Errorf("frame too large: %d (header=%v)", length, header)
+		}
 		body = make([]byte, length)
-                log(cn.c, fmt.Sprintf("read body %dbytes", length))
 		if err := cn.readFully(body); err != nil {
 			return 0, nil, err
 		}
-		nn := 32; if len(body) < nn { nn = len(body) }
-                //log(cn.c, fmt.Sprintf("body=%v", got, length, body[:nn]))
-		//if got != int(length) { LogPanic(fmt.Sprintf("got %d of %d body=%v", got, length, body[:nn])) }
 	}
 	if header[1]&flagCompressed != 0 && cn.compression == "snappy" {
 		var err error
 		body, err = snappy.Decode(nil, body)
 		if err != nil {
-			log(cn.c, fmt.Sprintf("snappy error on %v", cn.c))
-			LogPanic(fmt.Sprintf("snappy error on %v", cn.c))
-                        cn.c.Close()
-                        cn.c = nil // ensure we generate ErrBadConn
+			cn.c.Close()
+			cn.c = nil // ensure we generate ErrBadConn
 			return 0, nil, err
 		}
 	}
@@ -283,22 +267,22 @@ func (cn *connection) recv() (byte, []byte, error) {
 }
 
 func (cn *connection) Begin() (driver.Tx, error) {
-        if cn.c == nil { return nil, driver.ErrBadConn }
+	if cn.c == nil { return nil, driver.ErrBadConn }
 	return cn, nil
 }
 
 func (cn *connection) Commit() error {
-        if cn.c == nil { return driver.ErrBadConn }
+	if cn.c == nil { return driver.ErrBadConn }
 	return nil
 }
 
 func (cn *connection) Close() error {
-        if cn.c == nil { return driver.ErrBadConn }
+	if cn.c == nil { return driver.ErrBadConn }
 	return cn.c.Close()
 }
 
 func (cn *connection) Rollback() error {
-        if cn.c == nil { return driver.ErrBadConn }
+	if cn.c == nil { return driver.ErrBadConn }
 	return nil
 }
 
@@ -311,7 +295,6 @@ func (cn *connection) Prepare(query string) (driver.Stmt, error) {
 	}
 	opcode, body, err := cn.recv()
 	if err != nil {
-                err = fmt.Errorf("Error reading prepare result for query <<%s>> -- (%s)", query, err.Error())
 		return nil, err
 	}
 	if opcode != opResult || binary.BigEndian.Uint32(body) != 4 {
@@ -427,12 +410,9 @@ func (st *statement) Query(v []driver.Value) (driver.Rows, error) {
 		columns: columns,
 		meta:    meta,
 		numRows: int(binary.BigEndian.Uint32(body[i:])),
-		conn:    st.cn.c,
-		orig:    body,
 	}
 	i += 4
 	rows.body = body[i:]
-	log(st.cn.c, fmt.Sprintf("rows %v", rows))
 	return rows, nil
 }
 
@@ -442,8 +422,6 @@ type rows struct {
 	body    []byte
 	row     int
 	numRows int
-	conn	net.Conn
-	orig	[]byte
 }
 
 func (r *rows) Close() error {
@@ -455,39 +433,12 @@ func (r *rows) Columns() []string {
 }
 
 func (r *rows) Next(values []driver.Value) error {
-	var info string
-        defer func(){
-                if p := recover(); p != nil {
-			info += fmt.Sprintf("row: %v %v %d %d\n",r.columns,r.meta,r.row,r.numRows)
-			for i:=0; i<len(r.orig); i+=16 {
-				info += fmt.Sprintf("\n0x%04x: ", i)
-				for j:=0; j<16; j+=2 {
-					if i+j < len(r.orig) {
-						info += fmt.Sprintf(" %02x", r.orig[i+j])
-					}
-					if i+j+1 < len(r.orig) {
-						info += fmt.Sprintf("%02x", r.orig[i+j+1])
-					}
-				}
-			}
-			info += "\n"
-			
-			fmt.Println(info)
-			LogPanic(p)
-		}
-        }()
 	if r.row >= r.numRows {
 		return io.EOF
 	}
-        b0 := r.body
 	for column := 0; column < len(r.columns); column++ {
-		info = fmt.Sprintf("%s c=%d/%d b=%d/%d orig=%d",
-			r.conn.LocalAddr().String(), column, len(r.columns),
-			len(b0)-len(r.body), len(b0), len(r.orig))
 		n := int(binary.BigEndian.Uint32(r.body))
 		r.body = r.body[4:]
-		info += fmt.Sprintf(" t=0x%x n=%d bytes=%v addr=%s\n",
-			r.meta[column], n, r.body[:n], r.conn.LocalAddr().String())
 		if n >= 0 {
 			values[column] = decode(r.body[:n], r.meta[column])
 			r.body = r.body[n:]
@@ -509,47 +460,5 @@ func (e Error) Error() string {
 }
 
 func init() {
-        go logBunny()
 	sql.Register("gocql", &drv{})
-}
-
-//=== troubleshooting
-
-type logMsg struct {
-	p string
-        c net.Conn
-        msg string
-}
-var logChan = make(chan logMsg, 100)
-var logList = make([]*logMsg, 0)
-
-func log(c net.Conn, msg string) {
-        logChan <- logMsg{c.LocalAddr().String(), c, msg}
-}
-
-func logBunny() {
-        for {
-                m := <-logChan
-                logList = append(logList, &m)
-                if len(logList) > 100 {
-                        logList = logList[1:]
-                }
-        }
-}
-
-func LogPanic(what interface{}) {
-	L: for {
-		select {
-		case m := <-logChan:
-			fmt.Printf("EXTRA: %s: %s\n", m.p, m.msg)
-			logList = append(logList, &m)
-		default:
-			break L
-		}
-	}
-        for i,l := range logList {
-                fmt.Printf("LOG%02d %s: %s\n", i, l.p, l.msg)
-        }
-	logList = make([]*logMsg, 0)
-        panic(what)
 }
