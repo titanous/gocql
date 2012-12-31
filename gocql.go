@@ -191,6 +191,17 @@ func (cn *connection) send(opcode byte, body []byte) error {
 	return nil
 }
 
+// ReadFully reads a full byte array from a connection, issuing multiple net.conn.Read()
+// calls until all the bytes have come in
+func (cn *connection) readFully(b []byte) (err error) {
+	for got:=0; got<int(len(b)); {
+		new, err := cn.c.Read(b[got:])
+		if err != nil { return err }
+		got += new
+	}
+	return nil
+}
+
 func (cn *connection) recv() (byte, []byte, error) {
         defer func(){
                 if r := recover(); r != nil { LogPanic(r) }
@@ -200,7 +211,7 @@ func (cn *connection) recv() (byte, []byte, error) {
         }
 	header := make([]byte, 8)
         log(cn.c, fmt.Sprintf("read_"))
-	if _, err := cn.c.Read(header); err != nil {
+	if err := cn.readFully(header); err != nil {
                 log(cn.c, fmt.Sprintf("readH err=%s", err.Error()))
 		return 0, nil, err
 	}
@@ -244,14 +255,21 @@ func (cn *connection) recv() (byte, []byte, error) {
                 }
 		body = make([]byte, length)
                 log(cn.c, fmt.Sprintf("read body %dbytes", length))
-		if _, err := cn.c.Read(body); err != nil {
+		if err := cn.readFully(body); err != nil {
 			return 0, nil, err
 		}
+		nn := 32; if len(body) < nn { nn = len(body) }
+                //log(cn.c, fmt.Sprintf("body=%v", got, length, body[:nn]))
+		//if got != int(length) { LogPanic(fmt.Sprintf("got %d of %d body=%v", got, length, body[:nn])) }
 	}
 	if header[1]&flagCompressed != 0 && cn.compression == "snappy" {
 		var err error
 		body, err = snappy.Decode(nil, body)
 		if err != nil {
+			log(cn.c, fmt.Sprintf("snappy error on %v", cn.c))
+			LogPanic(fmt.Sprintf("snappy error on %v", cn.c))
+                        cn.c.Close()
+                        cn.c = nil // ensure we generate ErrBadConn
 			return 0, nil, err
 		}
 	}
@@ -409,9 +427,12 @@ func (st *statement) Query(v []driver.Value) (driver.Rows, error) {
 		columns: columns,
 		meta:    meta,
 		numRows: int(binary.BigEndian.Uint32(body[i:])),
+		conn:    st.cn.c,
+		orig:    body,
 	}
 	i += 4
 	rows.body = body[i:]
+	log(st.cn.c, fmt.Sprintf("rows %v", rows))
 	return rows, nil
 }
 
@@ -421,6 +442,8 @@ type rows struct {
 	body    []byte
 	row     int
 	numRows int
+	conn	net.Conn
+	orig	[]byte
 }
 
 func (r *rows) Close() error {
@@ -432,12 +455,39 @@ func (r *rows) Columns() []string {
 }
 
 func (r *rows) Next(values []driver.Value) error {
+	var info string
+        defer func(){
+                if p := recover(); p != nil {
+			info += fmt.Sprintf("row: %v %v %d %d\n",r.columns,r.meta,r.row,r.numRows)
+			for i:=0; i<len(r.orig); i+=16 {
+				info += fmt.Sprintf("\n0x%04x: ", i)
+				for j:=0; j<16; j+=2 {
+					if i+j < len(r.orig) {
+						info += fmt.Sprintf(" %02x", r.orig[i+j])
+					}
+					if i+j+1 < len(r.orig) {
+						info += fmt.Sprintf("%02x", r.orig[i+j+1])
+					}
+				}
+			}
+			info += "\n"
+			
+			fmt.Println(info)
+			LogPanic(p)
+		}
+        }()
 	if r.row >= r.numRows {
 		return io.EOF
 	}
+        b0 := r.body
 	for column := 0; column < len(r.columns); column++ {
+		info = fmt.Sprintf("%s c=%d/%d b=%d/%d orig=%d",
+			r.conn.LocalAddr().String(), column, len(r.columns),
+			len(b0)-len(r.body), len(b0), len(r.orig))
 		n := int(binary.BigEndian.Uint32(r.body))
 		r.body = r.body[4:]
+		info += fmt.Sprintf(" t=0x%x n=%d bytes=%v addr=%s\n",
+			r.meta[column], n, r.body[:n], r.conn.LocalAddr().String())
 		if n >= 0 {
 			values[column] = decode(r.body[:n], r.meta[column])
 			r.body = r.body[n:]
@@ -466,6 +516,7 @@ func init() {
 //=== troubleshooting
 
 type logMsg struct {
+	p string
         c net.Conn
         msg string
 }
@@ -473,7 +524,7 @@ var logChan = make(chan logMsg, 100)
 var logList = make([]*logMsg, 0)
 
 func log(c net.Conn, msg string) {
-        logChan <- logMsg{c, msg}
+        logChan <- logMsg{c.LocalAddr().String(), c, msg}
 }
 
 func logBunny() {
@@ -487,9 +538,18 @@ func logBunny() {
 }
 
 func LogPanic(what interface{}) {
-        for i:=len(logList)-1; i>=0; i-- {
-                l := logList[i]
-                fmt.Printf("LOG %v: %s\n", l.c, l.msg)
+	L: for {
+		select {
+		case m := <-logChan:
+			fmt.Printf("EXTRA: %s: %s\n", m.p, m.msg)
+			logList = append(logList, &m)
+		default:
+			break L
+		}
+	}
+        for i,l := range logList {
+                fmt.Printf("LOG%02d %s: %s\n", i, l.p, l.msg)
         }
+	logList = make([]*logMsg, 0)
         panic(what)
 }
