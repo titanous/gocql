@@ -488,7 +488,8 @@ func logBunny() {
 
 func LogPanic(what interface{}) {
         for i:=len(logList)-1; i>=0; i-- {
-                fmt.Printf("LOG %v: %s\n", logList[i].c, logList[i].msg)
+                l := logList[i]
+                fmt.Printf("LOG %v: %s\n", l.c, l.msg)
         }
         panic(what)
 }
